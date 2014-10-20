@@ -6,9 +6,10 @@
  */
 
 #include "ldpc.h"
-
+#include "vector_operations.h"
 
 namespace ecc {
+
 
 ldpc::ldpc() {
 	N = 0;
@@ -32,6 +33,8 @@ ldpc::ldpc() {
 ldpc::~ldpc() {
 
 	// host cleanup
+	if(cumBNW != NULL) cudaFreeHost(cumBNW);
+	if(cumCNW != NULL) cudaFreeHost(cumCNW);
 	if(BNW != NULL) cudaFreeHost(BNW);
 	if(CNW != NULL) cudaFreeHost(CNW);
 	if(BNAdjacency != NULL) cudaFreeHost(BNAdjacency);
@@ -72,19 +75,22 @@ ldpc::ldpc(const char * alist_file){
 	cudaHostAlloc((void**)&BNW,sizeof(int)*N,cudaHostAllocWriteCombined);					// allocate space for BNW
 	cudaHostAlloc((void**)&CNW,sizeof(int)*M,cudaHostAllocWriteCombined);					// allocate space for CNW
 
-	cudaHostAlloc((void**)&BNAdjacency,sizeof(int)*N*MaxBNW,cudaHostAllocWriteCombined);	// allocate space for BNAdjacency
-	cudaHostAlloc((void**)&CNAdjacency,sizeof(int)*M*MaxCNW,cudaHostAllocWriteCombined);	// allocate space for CNAdjacency
+	cudaHostAlloc((void**)&cumBNW,sizeof(int)*N,cudaHostAllocWriteCombined);					// allocate space for cumBNW
+	cudaHostAlloc((void**)&cumCNW,sizeof(int)*M,cudaHostAllocWriteCombined);					// allocate space for cumCNW
 
-	cudaHostAlloc((void**)&h_ligx,sizeof(int)*N*MaxBNW,cudaHostAllocWriteCombined);			// allocate space for h_ligx
-	cudaHostAlloc((void**)&h_ligf,sizeof(int)*M*MaxCNW,cudaHostAllocWriteCombined);			// allocate space for h_ligf
+	cudaHostAlloc((void**)&BNAdjacency,sizeof(int)*edges,cudaHostAllocWriteCombined);	// allocate space for BNAdjacency
+	cudaHostAlloc((void**)&CNAdjacency,sizeof(int)*edges,cudaHostAllocWriteCombined);	// allocate space for CNAdjacency
+
+	cudaHostAlloc((void**)&h_ligx,sizeof(int)*edges,cudaHostAllocWriteCombined);			// allocate space for h_ligx
+	cudaHostAlloc((void**)&h_ligf,sizeof(int)*edges,cudaHostAllocWriteCombined);			// allocate space for h_ligf
 
 
 	memset((void*)BNW, -1, N*sizeof(int));
 	memset((void*)CNW, -1, M*sizeof(int));
-	memset((void*)BNAdjacency, -1, sizeof(int)*N*MaxBNW);
-	memset((void*)CNAdjacency, -1, sizeof(int)*M*MaxCNW);
-	memset((void*)h_ligx, -1, sizeof(int)*N*MaxBNW);
-	memset((void*)h_ligf, -1, sizeof(int)*M*MaxCNW);
+	memset((void*)BNAdjacency, -1, sizeof(int)*edges);
+	memset((void*)CNAdjacency, -1, sizeof(int)*edges);
+	memset((void*)h_ligx, -1, sizeof(int)*edges);
+	memset((void*)h_ligf, -1, sizeof(int)*edges);
 
 
 	for(i = 0; i < N; i++)																	// read BNW
@@ -93,20 +99,36 @@ ldpc::ldpc(const char * alist_file){
 	for(i = 0; i < M; i++)																	// read CNW
 		fscanf(fd,"%d",&CNW[i]);
 
+	cumBNW[0] = 0;
+	for(i = 1; i < N; i++)																	// compute cumBNW
+		cumBNW[i] = cumBNW[i-1] + BNW[i];
+
+	cumCNW[0] = 0;
+	for(i = 1; i < M; i++)																	// compute cumCNW
+		cumCNW[i] = cumCNW[i-1] + CNW[i];
+
+	edges = cumBNW[N-1] + BNW[0];
+
+	if(cumCNW[M-1] + CNW[0] != edges)
+		printf("Number of edges does not add right\n");
+
 	for(i = 0; i < N; i++)																	// read BNAdjacency padded to the MaxBNW
 		for(j = 0; j < BNW[i]; j++){
-			fscanf(fd,"%d",&BNAdjacency[MaxBNW*i+j]);
+			fscanf(fd,"%d",&BNAdjacency[cumBNW[i]+j]);
 			//printf("BNW: %d %d\n",i,j);
 		}
 
 	for(i = 0; i < M; i++)																	// read CNAdjacency padded to the MaxBNW
 		for(j = 0; j < CNW[i]; j++){
-			fscanf(fd,"%d",&CNAdjacency[MaxCNW*i+j]);
+			fscanf(fd,"%d",&CNAdjacency[cumCNW[i]+j]);
 			//printf("CNW: %d %d\n",i,j);
 		}
 
 	fclose(fd);
-	generate_ligVectors();
+
+	generate_ligVectors();																	// generate the indexing tables for decoding
+	test_regularity();																		// set regularity flag
+
 }
 
 void ldpc::write_alistFile(const char *alist_file){
@@ -130,7 +152,7 @@ void ldpc::write_alistFile(const char *alist_file){
 
 	for(i = 0; i < N; i++){											// read BNAdjacency padded to the MaxBNW
 		for(j = 0; j < BNW[i]; j++){
-			fprintf(fd,"%d ",BNAdjacency[MaxBNW*i+j]);
+			fprintf(fd,"%d ",BNAdjacency[cumBNW[i]+j]);
 			//printf("BNW: %d %d\n",i,j);
 		}
 		fprintf(fd,"\n");
@@ -138,7 +160,7 @@ void ldpc::write_alistFile(const char *alist_file){
 
 	for(i = 0; i < M; i++){											// read CNAdjacency padded to the MaxBNW
 		for(j = 0; j < CNW[i]; j++){
-			fprintf(fd,"%d ",CNAdjacency[MaxCNW*i+j]);
+			fprintf(fd,"%d ",CNAdjacency[cumCNW[i]+j]);
 			//printf("CNW: %d %d\n",i,j);
 		}
 		fprintf(fd,"\n");
@@ -156,10 +178,24 @@ void ldpc::generate_PCM(){
 	cudaHostAlloc((void**)&h,sizeof(int*)*M*N,cudaHostAllocWriteCombined);						// allocate space for parity-check matrix
 	memset((void*)h, 0, M*N*sizeof(int));
 
-	for(i = 0; i < M; i++){
+	for(i = 0; i < M; i++)
 		for(j = 0; j < CNW[i]; j++){
-			h[M*i+CNAdjacency[MaxCNW*i+j]-1] = 1;
+			//printf("h(%2d,%2d) = 1\n",i+1,(CNAdjacency[cumCNW[i]+j]));
+			h[i*N+(CNAdjacency[cumCNW[i]+j]-1)] = 1;
 		}
+}
+
+void ldpc::print_PCM(FILE *fd){
+
+	int i, j;
+
+	if(h == NULL) generate_PCM();
+
+	for(i = 0; i < M; i++){
+		for(j = 0; j < N; j++){
+			fprintf(fd,"%d ",h[i*N+j]);
+		}
+		fprintf(fd,"\n");
 	}
 }
 
@@ -182,33 +218,62 @@ void ldpc::generate_ligVectors(){
 
 }
 
-void ldpc::print_PCM(FILE *fd){
+void ldpc::print_weights(FILE *fd){
 
-	int i, j;
+	int i;
 
-	if(h == NULL) generate_PCM();
-
-	for(i = 0; i < M; i++){
-		for(j = 0; j < N; j++){
-			fprintf(fd,"%d ",h[i*M+j]);
-		}
-		fprintf(fd,"\n");
+	fprintf(fd,"BNW: ");
+	for(i = 0; i < N; i++){
+		fprintf(fd,"%d ",BNW[i]);
 	}
-}
+	fprintf(fd,"\n");
+	fprintf(fd,"CNW: ");
+	for(i = 0; i < M; i++){
+		fprintf(fd,"%d ",CNW[i]);
+	}
+	fprintf(fd,"\n");
 
+	fprintf(fd,"cumBNW: ");
+	for(i = 0; i < N; i++){
+		fprintf(fd,"%d ",cumBNW[i]);
+	}
+	fprintf(fd,"\n");
+
+	fprintf(fd,"cumCNW: ");
+	for(i = 0; i < M; i++){
+		fprintf(fd,"%d ",cumCNW[i]);
+	}
+	fprintf(fd,"\n");
+}
 
 void ldpc::print_ligVectors(FILE *fd){
 
 	int i;
 
 	fprintf(fd,"ligx: ");
-	for(i = 0; i < N*MaxBNW; i++){
+	for(i = 0; i < edges; i++){
 		fprintf(fd,"%d ",h_ligx[i]);
 	}
 	fprintf(fd,"\n");
 	fprintf(fd,"ligf: ");
-	for(i = 0; i < N*MaxBNW; i++){
+	for(i = 0; i < edges; i++){
 		fprintf(fd,"%d ",h_ligf[i]);
+	}
+	fprintf(fd,"\n");
+}
+
+void ldpc::print_adjacencies(FILE *fd){
+
+	int i;
+
+	fprintf(fd,"BNAdjacency: ");
+	for(i = 0; i < edges; i++){
+		fprintf(fd,"%d ",BNAdjacency[i]);
+	}
+	fprintf(fd,"\n");
+	fprintf(fd,"CNAdjacency: ");
+	for(i = 0; i < edges; i++){
+		fprintf(fd,"%d ",CNAdjacency[i]);
 	}
 	fprintf(fd,"\n");
 }
@@ -279,6 +344,13 @@ void ldpc::setup_rng(unsigned int seed){
 
 }
 
+void ldpc::test_regularity(){
+
+	if(edges != M*MaxCNW)
+		h_regular = 0;
+	else
+		h_regular = 1;
+}
 
 
 __global__ void setup_kernel(curandState *state,unsigned int seed,int Nlim)
@@ -291,7 +363,7 @@ __global__ void setup_kernel(curandState *state,unsigned int seed,int Nlim)
 
 }
 
-__global__ void generate_noise(curandState *state,char4 *gamma,char4 *alpha, float Noise_stddev,char *tx_codeword,int Nlim)
+__global__ void generate_noise(curandState *state,char4 *gamma,char4 *alpha, float Noise_stddev,char *tx_codeword,int *BNW,int *cumBNW,int N,int Nlim)
 {
 
 	int id = threadIdx.x + blockIdx.x * blockDim.x;
@@ -334,7 +406,7 @@ __global__ void generate_noise(curandState *state,char4 *gamma,char4 *alpha, flo
 
 			state[id]=localState;
 
-			BroadCastBits(pack_gamma,gamma,alpha,id);
+			broadcast_bits(pack_gamma,gamma,alpha,BNW,cumBNW,N,id);
 
 
 		}
@@ -380,6 +452,122 @@ size_t roundUp(int group_size, int global_size)
 	}
 }
 
+
+__device__ void broadcast_bits(char4 pack_gamma,char4 *gamma,char4 *alpha,int *BNW,int *cumBNW,int N,unsigned int tid)
+{
+
+
+	if(tid<N){
+
+		gamma[tid] = pack_gamma;
+
+#pragma unroll
+		for(int i = 0; i < BNW[i]; i++)
+			alpha[cumBNW[tid]+i] = pack_gamma;
+	}
+}
+
+template <int maxBNW> __global__ void bitnode_processing(char4 *gamma,char4 *alpha,char4 *beta,int *BNW,int *cumBNW,int *ligx,int N,decoding_type decoder)
+{
+	register int tid = threadIdx.x + blockIdx.x*blockDim.x;
+
+	register int write_idx[maxBNW];
+	register int4 ld_llr[maxBNW];
+	register int4 st_llr[maxBNW];
+	register int4 sum;
+
+	register int i;
+
+	if(tid<N){
+
+		sum = load_char4_to_int4(gamma[tid]);
+
+		for(i = 0; i < BNW[i]; i++){
+			ld_llr[i] = load_char4_to_int4(beta[cumBNW[tid]+i]);			// load the beta messages
+			write_idx[i] = ligx[cumBNW[tid]+i];								// load the writing indexes
+			sum += ld_llr[i];
+		}
+
+		for(i = 0; i < BNW[i]; i++){
+			st_llr[i] = sum - ld_llr[i];
+			alpha[cumBNW[tid]+i] = store_int4_to_char4(st_llr[write_idx[i]],128);					// store the alpha messages
+		}
+	}
+}
+
+template __global__ void bitnode_processing<1>(char4 *gamma,char4 *alpha,char4 *beta,int *BNW,int *cumBNW,int *ligx,int N,decoding_type decoder);
+template __global__ void bitnode_processing<2>(char4 *gamma,char4 *alpha,char4 *beta,int *BNW,int *cumBNW,int *ligx,int N,decoding_type decoder);
+template __global__ void bitnode_processing<3>(char4 *gamma,char4 *alpha,char4 *beta,int *BNW,int *cumBNW,int *ligx,int N,decoding_type decoder);
+template __global__ void bitnode_processing<4>(char4 *gamma,char4 *alpha,char4 *beta,int *BNW,int *cumBNW,int *ligx,int N,decoding_type decoder);
+template __global__ void bitnode_processing<5>(char4 *gamma,char4 *alpha,char4 *beta,int *BNW,int *cumBNW,int *ligx,int N,decoding_type decoder);
+template __global__ void bitnode_processing<6>(char4 *gamma,char4 *alpha,char4 *beta,int *BNW,int *cumBNW,int *ligx,int N,decoding_type decoder);
+template __global__ void bitnode_processing<7>(char4 *gamma,char4 *alpha,char4 *beta,int *BNW,int *cumBNW,int *ligx,int N,decoding_type decoder);
+
+template <int maxCNW> __global__ void checknode_processing(char4 *alpha,char4 *beta,int *CNW,int *cumCNW,int *ligf,int M,decoding_type decoder)
+{
+	register int tid = threadIdx.x + blockIdx.x*blockDim.x;
+
+	register int write_idx[maxCNW];
+	register int4 ld_llr[maxCNW];
+	register int4 st_llr[maxCNW];
+	register int4 sig_llr[maxCNW];
+	register int4 mag_llr[maxCNW];
+	register int4 min_idx;
+
+	register int4 min1,min2;
+
+	register int i;
+
+	if(tid<M){
+
+		ld_llr[0] = load_char4_to_int4(beta[cumCNW[tid]+0]);									// load the first beta message
+		write_idx[0] = ligf[cumCNW[tid]+0];														// load the first writing index
+		min1 = min2 = mag_llr[0] = abs(ld_llr[0]);
+		min_idx = make_int4(0,0,0,0);
+
+		for(i = 1; i < CNW[i]; i++){
+			ld_llr[i] = load_char4_to_int4(beta[cumCNW[tid]+i]);								// load the beta messages
+			mag_llr[i] = abs(ld_llr[i]);														// compute the magnitude of beta messages
+			write_idx[i] = ligf[cumCNW[tid]+i];													// load the writing indexes
+
+			min_idx = min(mag_llr[i],min1,min2,i);												// find minimums and store the indexes of absolute min1
+		}
+
+
+###TERMINATE MINIMUM PROPAGATION###
+
+
+		for(i = 0; i < CNW[i]; i++){
+			st_llr[i] = mag_llr[i] * sig_llr[i];
+			alpha[cumCNW[tid]+i] = store_int4_to_char4(st_llr[write_idx[i]],128);					// store the alpha messages
+		}
+	}
+}
+
+template __global__ void checknode_processing<1>(char4 *alpha,char4 *beta,int *CNW,int *cumCNW,int *ligf,int M,decoding_type decoder);
+template __global__ void checknode_processing<2>(char4 *alpha,char4 *beta,int *CNW,int *cumCNW,int *ligf,int M,decoding_type decoder);
+template __global__ void checknode_processing<3>(char4 *alpha,char4 *beta,int *CNW,int *cumCNW,int *ligf,int M,decoding_type decoder);
+template __global__ void checknode_processing<4>(char4 *alpha,char4 *beta,int *CNW,int *cumCNW,int *ligf,int M,decoding_type decoder);
+template __global__ void checknode_processing<5>(char4 *alpha,char4 *beta,int *CNW,int *cumCNW,int *ligf,int M,decoding_type decoder);
+template __global__ void checknode_processing<6>(char4 *alpha,char4 *beta,int *CNW,int *cumCNW,int *ligf,int M,decoding_type decoder);
+
+//
+//__device__ void msa(int gamma,int *ld_llr,int *st_llr,int *BNW)
+//{
+//
+//	register int i;
+//	register int sum = 0;
+//
+//	for(i = 0; i < BNW[i]; i++){
+//		sum += ld_llr[i];
+//	}
+//	sum += gamma;
+//	for(i = 0; i < BNW[i]; i++){
+//		st_llr[i] = sum - ld_llr[i];
+//	}
+//
+//
+//}
 } /* namespace ecc */
 
 

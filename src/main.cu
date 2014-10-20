@@ -81,13 +81,15 @@ int main(void) {
 	CUDA_CHECK_RETURN(cudaFree((void*) d));
 
 
-	ecc::ldpc example("20x10_b6c3.alist");
+	ecc::ldpc example("ldpc_alist_files/20x10_b6c3.alist");
 	example.write_alistFile("20x10_b6c3.alist.new");
 	example.print_PCM(stdout);
-	example.print_ligVectors(stdout);
-	example.init_device(0);
-	example.copy_data(cudaMemcpyHostToDevice);
-	example.copy_data(cudaMemcpyDeviceToHost);
+	example.print_adjacencies(stdout);
+//	example.print_ligVectors(stdout);
+	example.print_weights(stdout);
+//	example.init_device(0);
+//	example.copy_data(cudaMemcpyHostToDevice);
+//	example.copy_data(cudaMemcpyDeviceToHost);
 
 	/*for(int i = 0; i < 22; i++)
 		printf("%d: %d %d\n",3072,1 << i,ecc::roundUp(1 << i,3072)/(1 << i));
